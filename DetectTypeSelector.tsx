@@ -23,22 +23,9 @@ import React from 'react';
 import {DetectTypeAtom, HoverEnteredAtom} from './atoms';
 import {DetectTypes} from './Types';
 
-export function DetectTypeSelector() {
-  return (
-    <div className="flex flex-col flex-shrink-0">
-      <div className="mb-3 uppercase">Give me:</div>
-      <div className="flex flex-col gap-3">
-        {['2D bounding boxes', 'Segmentation masks', 'Points'].map((label) => (
-          <SelectOption key={label} label={label} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// Fix: Changed component to a function declaration.
-// This helps TypeScript correctly infer that this is a React component
-// that can accept a `key` prop.
+// Fix: Changed to a function declaration. This helps TypeScript correctly
+// infer that this is a React component that can accept a `key` prop, resolving
+// a type error.
 function SelectOption({label}: {label: string}) {
   const [detectType, setDetectType] = useAtom(DetectTypeAtom);
   const [, setHoverEntered] = useAtom(HoverEnteredAtom);
@@ -57,5 +44,18 @@ function SelectOption({label}: {label: string}) {
       }}>
       {label}
     </button>
+  );
+}
+
+export function DetectTypeSelector() {
+  return (
+    <div className="flex flex-col flex-shrink-0">
+      <div className="mb-3 uppercase">Give me:</div>
+      <div className="flex flex-col gap-3">
+        {['2D bounding boxes', 'Segmentation masks', 'Points'].map((label) => (
+          <SelectOption key={label} label={label} />
+        ))}
+      </div>
+    </div>
   );
 }
