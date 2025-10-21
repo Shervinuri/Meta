@@ -1,0 +1,58 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap");
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-size: 13px;
+  background-color: var(--bg-color);
+  color: var(--text-color-primary);
+}
+
+:root {
+  --bg-color: #F3F3F6;
+  --accent-color: #2872E3;
+  --border-color: #C6C6C9;
+  --text-color-primary: #1E1E1E;
+  font-family: "Space Mono", monospace;
+  font-weight: 400;
+  font-size: 14px;
+  color: var(--text-color-primary);
+  background-color: var(--bg-color);
+}
+
+.dark {
+  --bg-color: #1C1F21;
+  --accent-color: #7FBBFF;
+  --border-color: #37393c;
+  --text-color-primary: #fff;
+  color: var(--text-color-primary);
+  background-color: var(--bg-color);
+  color-scheme: dark;
+}
+
+button, .button {
+  appearance: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  color: var(--text-color-primary);
+  border: 1px solid var(--border-color);
+  padding: 14px 20px;
+  border-radius: 999px;
+}
+
+button:hover, .button:hover {
+  border-color: var(--accent-color);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Live AI Assistant",
+  "description": "An AI-powered assistant that uses your camera and microphone to help you understand and interact with the world around you in real-time.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
