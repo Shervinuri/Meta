@@ -25,10 +25,9 @@ import {
   Type,
   FunctionDeclaration,
 } from '@google/genai';
-import {useAtom, useAtomValue} from 'jotai';
+import {useAtom} from 'jotai';
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
-  ApiKeyAtom,
   BoundingBoxesAtom,
   ConnectionStateAtom,
   TranscriptsAtom,
@@ -67,25 +66,45 @@ export function Conversation() {
   const [connectionState, setConnectionState] = useAtom(ConnectionStateAtom);
   const [transcripts, setTranscripts] = useAtom(TranscriptsAtom);
   const [boundingBoxes, setBoundingBoxes] = useAtom(BoundingBoxesAtom);
-  const apiKey = useAtomValue(ApiKeyAtom);
+  const [isMuted, setIsMuted] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAudioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
   const boxTimeoutRef = useRef<number | null>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (transcriptContainerRef.current) {
+      transcriptContainerRef.current.scrollTop =
+        transcriptContainerRef.current.scrollHeight;
+    }
+  }, [transcripts]);
 
   const stopAISession = useCallback(() => {
     sessionPromiseRef.current?.then((session) => session.close());
     sessionPromiseRef.current = null;
 
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
+    if (
+      inputAudioContextRef.current &&
+      inputAudioContextRef.current.state !== 'closed'
+    ) {
+      inputAudioContextRef.current.close();
     }
-    audioContextRef.current = null;
+    inputAudioContextRef.current = null;
+    if (
+      outputAudioContextRef.current &&
+      outputAudioContextRef.current.state !== 'closed'
+    ) {
+      outputAudioContextRef.current.close();
+    }
+    outputAudioContextRef.current = null;
+
     scriptProcessorRef.current?.disconnect();
     scriptProcessorRef.current = null;
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
@@ -95,223 +114,6 @@ export function Conversation() {
     setConnectionState('idle');
     setBoundingBoxes([]);
   }, [setConnectionState, setBoundingBoxes]);
-
-  const startConversation = async () => {
-    if (!apiKey) {
-      alert('Please set your API key first.');
-      return;
-    }
-
-    if (!mediaStreamRef.current) {
-      alert(
-        'Camera stream not available. Please wait for it to load or check permissions.',
-      );
-      return;
-    }
-
-    const ai = new GoogleGenAI({apiKey});
-
-    setConnectionState('connecting');
-    setTranscripts([]);
-    setBoundingBoxes([]);
-
-    try {
-      const stream = mediaStreamRef.current;
-
-      const inputAudioContext = new (window.AudioContext ||
-        (window as any).webkitAudioContext)({sampleRate: 16000});
-      audioContextRef.current = inputAudioContext;
-      const outputAudioContext = new (window.AudioContext ||
-        (window as any).webkitAudioContext)({sampleRate: 24000});
-      let nextStartTime = 0;
-
-      sessionPromiseRef.current = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
-          },
-          systemInstruction:
-            'You are a helpful AI assistant. The user is streaming their camera and microphone to you. Your goal is to help them understand and interact with their environment. Answer their questions about what they are seeing. When you verbally refer to a specific object that is visible in the camera feed, you MUST use the provided `highlight_object` tool to draw a box around it. Be conversational and helpful.',
-          tools: [{functionDeclarations: [highlightObjectFunctionDeclaration]}],
-          outputAudioTranscription: {},
-          inputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: () => {
-            setConnectionState('connected');
-            const source = inputAudioContext.createMediaStreamSource(stream);
-            const scriptProcessor = inputAudioContext.createScriptProcessor(
-              4096,
-              1,
-              1,
-            );
-            scriptProcessorRef.current = scriptProcessor;
-
-            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-              const inputData =
-                audioProcessingEvent.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) {
-                int16[i] = inputData[i] * 32768;
-              }
-              const pcmBlob = {
-                data: encode(new Uint8Array(int16.buffer)),
-                mimeType: 'audio/pcm;rate=16000',
-              };
-              sessionPromiseRef.current?.then((session) => {
-                session.sendRealtimeInput({media: pcmBlob});
-              });
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputAudioContext.destination);
-
-            if (frameIntervalRef.current)
-              clearInterval(frameIntervalRef.current);
-            frameIntervalRef.current = window.setInterval(() => {
-              const tempCanvas = document.createElement('canvas');
-              if (videoRef.current && tempCanvas) {
-                tempCanvas.width = videoRef.current.videoWidth;
-                tempCanvas.height = videoRef.current.videoHeight;
-                tempCanvas
-                  .getContext('2d')
-                  ?.drawImage(
-                    videoRef.current,
-                    0,
-                    0,
-                    videoRef.current.videoWidth,
-                    videoRef.current.videoHeight,
-                  );
-                tempCanvas.toBlob(
-                  async (blob) => {
-                    if (blob) {
-                      const base64Data = await blobToBase64(blob);
-                      sessionPromiseRef.current?.then((session) => {
-                        session.sendRealtimeInput({
-                          media: {data: base64Data, mimeType: 'image/jpeg'},
-                        });
-                      });
-                    }
-                  },
-                  'image/jpeg',
-                  JPEG_QUALITY,
-                );
-              }
-            }, 1000 / FRAME_RATE);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              setTranscripts((prev) => {
-                const last = prev[prev.length - 1];
-                if (last?.source === 'user' && !last.isFinal) {
-                  return [
-                    ...prev.slice(0, -1),
-                    {...last, text: last.text + text},
-                  ];
-                }
-                return [...prev, {source: 'user', text, isFinal: false}];
-              });
-            } else if (message.serverContent?.outputTranscription) {
-              const text = message.serverContent.outputTranscription.text;
-              setTranscripts((prev) => {
-                const last = prev[prev.length - 1];
-                if (last?.source === 'model' && !last.isFinal) {
-                  return [
-                    ...prev.slice(0, -1),
-                    {...last, text: last.text + text},
-                  ];
-                }
-                return [...prev, {source: 'model', text, isFinal: false}];
-              });
-            }
-
-            if (message.serverContent?.turnComplete) {
-              setTranscripts((prev) =>
-                prev.map((t) => ({...t, isFinal: true})),
-              );
-            }
-
-            if (message.toolCall?.functionCalls) {
-              for (const fc of message.toolCall.functionCalls as any[]) {
-                if (fc.name === 'highlight_object' && fc.args.box_2d) {
-                  const [ymin, xmin, ymax, xmax] = fc.args.box_2d;
-                  const newBox: BoundingBox2DType = {
-                    x: xmin / 1000,
-                    y: ymin / 1000,
-                    width: (xmax - xmin) / 1000,
-                    height: (ymax - ymin) / 1000,
-                    label: fc.args.label,
-                  };
-                  setBoundingBoxes([newBox]); // Show one box at a time
-
-                  if (boxTimeoutRef.current) {
-                    clearTimeout(boxTimeoutRef.current);
-                  }
-                  boxTimeoutRef.current = window.setTimeout(() => {
-                    setBoundingBoxes([]);
-                    boxTimeoutRef.current = null;
-                  }, 3000);
-                }
-
-                sessionPromiseRef.current?.then((session) => {
-                  session.sendToolResponse({
-                    functionResponses: {
-                      id: fc.id,
-                      name: fc.name,
-                      response: {result: 'ok'},
-                    },
-                  });
-                });
-              }
-            }
-
-            const base64Audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
-            if (base64Audio) {
-              nextStartTime = Math.max(
-                nextStartTime,
-                outputAudioContext.currentTime,
-              );
-              const audioBuffer = await decodeAudioData(
-                decode(base64Audio),
-                outputAudioContext,
-                24000,
-                1,
-              );
-              const source = outputAudioContext.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(outputAudioContext.destination);
-              source.start(nextStartTime);
-              nextStartTime += audioBuffer.duration;
-            }
-          },
-          onerror: (e: ErrorEvent) => {
-            console.error(e);
-            setConnectionState('error');
-            stopAISession();
-            if (e.message.includes('API key not valid')) {
-              alert(
-                'Your API key is not valid. Please check your key and refresh the page to try again.',
-              );
-              localStorage.removeItem('gemini_api_key');
-              window.location.reload();
-            }
-          },
-          onclose: (e: CloseEvent) => {
-            setConnectionState('closed');
-            stopAISession();
-          },
-        },
-      });
-    } catch (err) {
-      console.error(err);
-      setConnectionState('error');
-      stopAISession();
-    }
-  };
 
   const draw = useCallback(() => {
     if (
@@ -329,17 +131,19 @@ export function Conversation() {
 
       const videoRatio = video.videoWidth / video.videoHeight;
       const canvasRatio = canvas.width / canvas.height;
-      let drawWidth = canvas.width;
-      let drawHeight = canvas.height;
-      let x = 0;
-      let y = 0;
+      let drawWidth: number, drawHeight: number, x: number, y: number;
 
+      // "object-cover" logic to fill the canvas
       if (videoRatio > canvasRatio) {
-        drawHeight = canvas.width / videoRatio;
-        y = (canvas.height - drawHeight) / 2;
-      } else {
-        drawWidth = canvas.height * videoRatio;
+        drawHeight = canvas.height;
+        drawWidth = drawHeight * videoRatio;
         x = (canvas.width - drawWidth) / 2;
+        y = 0;
+      } else {
+        drawWidth = canvas.width;
+        drawHeight = drawWidth / videoRatio;
+        x = 0;
+        y = (canvas.height - drawHeight) / 2;
       }
 
       ctx.drawImage(video, x, y, drawWidth, drawHeight);
@@ -347,12 +151,12 @@ export function Conversation() {
       boundingBoxes.forEach((box) => {
         ctx.strokeStyle = '#7FBBFF';
         ctx.lineWidth = 4;
-        ctx.strokeRect(
-          x + box.x * drawWidth,
-          y + box.y * drawHeight,
-          box.width * drawWidth,
-          box.height * drawHeight,
-        );
+        const boxX = x + box.x * drawWidth;
+        const boxY = y + box.y * drawHeight;
+        const boxWidth = box.width * drawWidth;
+        const boxHeight = box.height * drawHeight;
+
+        ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
 
         const label = box.label;
         const padding = 8;
@@ -363,19 +167,15 @@ export function Conversation() {
         // Label background
         ctx.fillStyle = '#7FBBFF';
         ctx.fillRect(
-          x + box.x * drawWidth - 2,
-          y + box.y * drawHeight - (fontHeight + padding) - 2,
-          textMetrics.width + padding * 2,
+          boxX - 2,
+          boxY - (fontHeight + padding) - 2,
+          textMetrics.width + padding * 2 + 4,
           fontHeight + padding,
         );
 
         // Label text
         ctx.fillStyle = 'black';
-        ctx.fillText(
-          label,
-          x + box.x * drawWidth + padding,
-          y + box.y * drawHeight - padding / 2 - 2,
-        );
+        ctx.fillText(label, boxX + padding, boxY - padding / 2 - 2);
       });
     }
   }, [boundingBoxes]);
@@ -384,7 +184,223 @@ export function Conversation() {
     let isMounted = true;
     let localAnimationFrameId: number;
 
-    async function setupCameraAndDraw() {
+    async function setupCameraAndStartSession() {
+      const startAISession = async (stream: MediaStream) => {
+        const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
+
+        setConnectionState('connecting');
+        setTranscripts([]);
+        setBoundingBoxes([]);
+
+        try {
+          const inputAudioContext = new (window.AudioContext ||
+            (window as any).webkitAudioContext)({sampleRate: 16000});
+          inputAudioContextRef.current = inputAudioContext;
+
+          const outputAudioContext = new (window.AudioContext ||
+            (window as any).webkitAudioContext)({sampleRate: 24000});
+          outputAudioContextRef.current = outputAudioContext;
+          if (outputAudioContext.state === 'suspended') {
+            setIsMuted(true);
+          }
+
+          let nextStartTime = 0;
+
+          sessionPromiseRef.current = ai.live.connect({
+            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
+              },
+              systemInstruction:
+                'You are a helpful AI assistant. The user is streaming their camera and microphone to you. Your goal is to help them understand and interact with their environment. Answer their questions about what they are seeing. When you verbally refer to a specific object that is visible in the camera feed, you MUST use the provided `highlight_object` tool to draw a box around it. Be conversational and helpful.',
+              tools: [
+                {functionDeclarations: [highlightObjectFunctionDeclaration]},
+              ],
+              outputAudioTranscription: {},
+              inputAudioTranscription: {},
+            },
+            callbacks: {
+              onopen: () => {
+                if (!isMounted) return;
+                setConnectionState('connected');
+                const source =
+                  inputAudioContext.createMediaStreamSource(stream);
+                const scriptProcessor =
+                  inputAudioContext.createScriptProcessor(4096, 1, 1);
+                scriptProcessorRef.current = scriptProcessor;
+
+                scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                  const inputData =
+                    audioProcessingEvent.inputBuffer.getChannelData(0);
+                  const l = inputData.length;
+                  const int16 = new Int16Array(l);
+                  for (let i = 0; i < l; i++) {
+                    int16[i] = inputData[i] * 32768;
+                  }
+                  const pcmBlob = {
+                    data: encode(new Uint8Array(int16.buffer)),
+                    mimeType: 'audio/pcm;rate=16000',
+                  };
+                  sessionPromiseRef.current?.then((session) => {
+                    session.sendRealtimeInput({media: pcmBlob});
+                  });
+                };
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(inputAudioContext.destination);
+
+                if (frameIntervalRef.current)
+                  clearInterval(frameIntervalRef.current);
+                frameIntervalRef.current = window.setInterval(() => {
+                  const tempCanvas = document.createElement('canvas');
+                  if (videoRef.current && tempCanvas) {
+                    tempCanvas.width = videoRef.current.videoWidth;
+                    tempCanvas.height = videoRef.current.videoHeight;
+                    tempCanvas
+                      .getContext('2d')
+                      ?.drawImage(
+                        videoRef.current,
+                        0,
+                        0,
+                        videoRef.current.videoWidth,
+                        videoRef.current.videoHeight,
+                      );
+                    tempCanvas.toBlob(
+                      async (blob) => {
+                        if (blob) {
+                          const base64Data = await blobToBase64(blob);
+                          sessionPromiseRef.current?.then((session) => {
+                            session.sendRealtimeInput({
+                              media: {
+                                data: base64Data,
+                                mimeType: 'image/jpeg',
+                              },
+                            });
+                          });
+                        }
+                      },
+                      'image/jpeg',
+                      JPEG_QUALITY,
+                    );
+                  }
+                }, 1000 / FRAME_RATE);
+              },
+              onmessage: async (message: LiveServerMessage) => {
+                if (!isMounted) return;
+                if (message.serverContent?.inputTranscription) {
+                  const text = message.serverContent.inputTranscription.text;
+                  setTranscripts((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.source === 'user' && !last.isFinal) {
+                      return [
+                        ...prev.slice(0, -1),
+                        {...last, text: last.text + text},
+                      ];
+                    }
+                    return [...prev, {source: 'user', text, isFinal: false}];
+                  });
+                } else if (message.serverContent?.outputTranscription) {
+                  const text = message.serverContent.outputTranscription.text;
+                  setTranscripts((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.source === 'model' && !last.isFinal) {
+                      return [
+                        ...prev.slice(0, -1),
+                        {...last, text: last.text + text},
+                      ];
+                    }
+                    return [...prev, {source: 'model', text, isFinal: false}];
+                  });
+                }
+
+                if (message.serverContent?.turnComplete) {
+                  setTranscripts((prev) =>
+                    prev.map((t) => ({...t, isFinal: true})),
+                  );
+                }
+
+                if (message.toolCall?.functionCalls) {
+                  for (const fc of message.toolCall.functionCalls as any[]) {
+                    if (fc.name === 'highlight_object' && fc.args.box_2d) {
+                      const [ymin, xmin, ymax, xmax] = fc.args.box_2d;
+                      const newBox: BoundingBox2DType = {
+                        x: xmin / 1000,
+                        y: ymin / 1000,
+                        width: (xmax - xmin) / 1000,
+                        height: (ymax - ymin) / 1000,
+                        label: fc.args.label,
+                      };
+                      setBoundingBoxes([newBox]); // Show one box at a time
+
+                      if (boxTimeoutRef.current) {
+                        clearTimeout(boxTimeoutRef.current);
+                      }
+                      boxTimeoutRef.current = window.setTimeout(() => {
+                        setBoundingBoxes([]);
+                        boxTimeoutRef.current = null;
+                      }, 3000);
+                    }
+
+                    sessionPromiseRef.current?.then((session) => {
+                      session.sendToolResponse({
+                        functionResponses: {
+                          id: fc.id,
+                          name: fc.name,
+                          response: {result: 'ok'},
+                        },
+                      });
+                    });
+                  }
+                }
+
+                const base64Audio =
+                  message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+                if (
+                  base64Audio &&
+                  outputAudioContextRef.current?.state === 'running'
+                ) {
+                  const oac = outputAudioContextRef.current;
+                  nextStartTime = Math.max(nextStartTime, oac.currentTime);
+                  const audioBuffer = await decodeAudioData(
+                    decode(base64Audio),
+                    oac,
+                    24000,
+                    1,
+                  );
+                  const source = oac.createBufferSource();
+                  source.buffer = audioBuffer;
+                  source.connect(oac.destination);
+                  source.start(nextStartTime);
+                  nextStartTime += audioBuffer.duration;
+                }
+              },
+              onerror: (e: ErrorEvent) => {
+                if (!isMounted) return;
+                console.error(e);
+                setConnectionState('error');
+                stopAISession();
+                if (e.message.includes('API key not valid')) {
+                  alert(
+                    'The provided API key is not valid. Please check the API_KEY environment variable.',
+                  );
+                }
+              },
+              onclose: (e: CloseEvent) => {
+                if (!isMounted) return;
+                setConnectionState('closed');
+                stopAISession();
+              },
+            },
+          });
+        } catch (err) {
+          if (!isMounted) return;
+          console.error(err);
+          setConnectionState('error');
+          stopAISession();
+        }
+      };
+
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
@@ -402,6 +418,8 @@ export function Conversation() {
           await videoRef.current.play();
         }
 
+        startAISession(stream);
+
         const drawLoop = () => {
           if (!isMounted) return;
           draw();
@@ -418,7 +436,7 @@ export function Conversation() {
       }
     }
 
-    setupCameraAndDraw();
+    setupCameraAndStartSession();
 
     return () => {
       isMounted = false;
@@ -427,13 +445,22 @@ export function Conversation() {
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     };
-  }, [draw, stopAISession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draw, stopAISession, setBoundingBoxes, setConnectionState]);
 
-  const isProcessing =
-    connectionState === 'connected' || connectionState === 'connecting';
+  const resumeAudio = useCallback(() => {
+    if (
+      outputAudioContextRef.current &&
+      outputAudioContextRef.current.state === 'suspended'
+    ) {
+      outputAudioContextRef.current.resume().then(() => {
+        setIsMuted(false);
+      });
+    }
+  }, []);
 
   const statusInfo = {
-    idle: {color: 'bg-gray-500', text: 'Idle'},
+    idle: {color: 'bg-gray-500', text: 'Initializing...'},
     connecting: {color: 'bg-yellow-500 animate-pulse', text: 'Connecting...'},
     connected: {color: 'bg-green-500', text: 'Connected'},
     error: {color: 'bg-red-500', text: 'Error'},
@@ -441,133 +468,100 @@ export function Conversation() {
   }[connectionState];
 
   return (
-    <div className="w-full h-full flex bg-black">
-      {/* Camera Feed Area */}
-      <div className="flex-1 h-full relative overflow-hidden bg-black">
-        <video ref={videoRef} className="hidden" playsInline muted></video>
-        <canvas
-          ref={canvasRef}
-          className="absolute top-0 left-0 w-full h-full"
-        ></canvas>
+    <div
+      className="w-screen h-screen relative overflow-hidden bg-black"
+      onClick={resumeAudio}>
+      <video ref={videoRef} className="hidden" playsInline muted></video>
+      <canvas
+        ref={canvasRef}
+        className="absolute top-0 left-0 w-full h-full"></canvas>
+
+      {isMuted && connectionState === 'connected' && (
+        <div
+          className="absolute inset-0 bg-black bg-opacity-60 flex items-center justify-center z-30 text-white cursor-pointer"
+          aria-label="Enable audio"
+          role="button">
+          <div className="text-center">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className="w-16 h-16 mx-auto mb-4">
+              <path
+                fillRule="evenodd"
+                d="M1.5 4.5a3 3 0 0 1 3-3h1.372c.86 0 1.61.586 1.819 1.42l1.105 4.423a1.875 1.875 0 0 1-.694 1.955l-1.293.97c-.135.101-.164.298-.083.465a15.3 15.3 0 0 0 6.88 6.88.75.75 0 0 0 .465-.083l.97-1.293a1.875 1.875 0 0 1 1.955-.694l4.423 1.105c.834.209 1.42.959 1.42 1.82V19.5a3 3 0 0 1-3 3h-2.25C6.34 22.5 1.5 17.66 1.5 8.25V6H4.5v2.25A.75.75 0 0 0 5.25 9h1.5a.75.75 0 0 0 .75-.75V6H4.5V4.5Z"
+                clipRule="evenodd"
+              />
+            </svg>
+            <p className="text-2xl font-bold">Tap to enable audio</p>
+          </div>
+        </div>
+      )}
+
+      {/* Status Indicator */}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20">
+        <div className="flex items-center gap-2 text-sm bg-black bg-opacity-60 text-white px-3 py-1 rounded-full">
+          <div className={`w-3 h-3 rounded-full ${statusInfo.color}`}></div>
+          <span>{statusInfo.text}</span>
+        </div>
       </div>
 
-      {/* Sidebar */}
-      <div className="w-96 flex-shrink-0 h-full flex flex-col bg-zinc-900 border-l border-zinc-700">
-        {/* Header */}
-        <div className="p-4 border-b border-zinc-700 text-center">
-          <h1 className="text-xl font-bold">Live AI Assistant</h1>
-          <div className="text-xs text-zinc-400 mt-2 font-mono">
-            Model: gemini-2.5-flash-native-audio-preview-09-2025
-          </div>
-        </div>
-
-        {/* Transcripts */}
-        <div className="flex-grow p-4 overflow-y-auto">
-          <div className="flex flex-col gap-4">
-            {transcripts.length === 0 && (
-              <div className="text-center text-zinc-400 flex-grow flex items-center justify-center h-full">
-                <p className="max-w-xs">
-                  {connectionState === 'connected'
-                    ? 'The session is live. Start speaking to the assistant.'
-                    : "Press 'Start Session' and begin your conversation. The AI is ready to listen."}
-                </p>
-              </div>
-            )}
-            {transcripts.map((t, i) => (
-              <div
-                key={i}
-                className={`flex gap-3 ${
-                  t.source === 'user' ? 'justify-end' : 'justify-start'
-                }`}
-              >
-                {t.source === 'model' && (
-                  <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className="w-5 h-5 text-zinc-300"
-                    >
-                      <path d="M12 2a1 1 0 0 1 1 1v1a1 1 0 0 1-2 0V3a1 1 0 0 1 1-1Zm0 18a1 1 0 0 1-1 1v1a1 1 0 0 1 2 0v-1a1 1 0 0 1-1-1Zm7-7a1 1 0 0 1 1 1h1a1 1 0 0 1 0 2h-1a1 1 0 0 1-1-1Zm-15 0a1 1 0 0 1-1-1H2a1 1 0 0 1 0-2h1a1 1 0 0 1 1 1Zm2.929-4.071a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414Zm10.607 9.193a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414ZM6.929 6.222a1 1 0 0 1 0 1.414l-.707.707A1 1 0 0 1 4.808 7.63l.707-.707a1 1 0 0 1 1.414 0Zm11.314 9.899a1 1 0 0 1 0 1.414l-.707.707a1 1 0 0 1-1.414-1.414l.707-.707a1 1 0 0 1 1.414 0ZM12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z" />
-                    </svg>
-                  </div>
-                )}
-                <div
-                  className={`rounded-lg px-4 py-2 max-w-[85%] ${
-                    t.source === 'user' ? 'bg-blue-700' : 'bg-zinc-700'
-                  }`}
-                >
-                  <p className="text-white whitespace-pre-wrap">{t.text}</p>
+      {/* Transcripts Overlay */}
+      <div
+        ref={transcriptContainerRef}
+        className="absolute bottom-0 left-0 right-0 h-2/5 bg-gradient-to-t from-black via-black/70 to-transparent p-4 overflow-y-auto z-10 scroll-smooth">
+        <div className="flex flex-col gap-3 pb-8">
+          {transcripts.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center text-white z-0">
+              <p className="max-w-xs text-center bg-black bg-opacity-50 p-4 rounded-lg">
+                {connectionState === 'connected'
+                  ? 'The session is live. Start speaking to the assistant.'
+                  : 'Connecting to the AI assistant... Please wait.'}
+              </p>
+            </div>
+          )}
+          {transcripts.map((t, i) => (
+            <div
+              key={i}
+              className={`flex gap-3 ${
+                t.source === 'user' ? 'justify-end' : 'justify-start'
+              }`}>
+              {t.source === 'model' && (
+                <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className="w-5 h-5 text-zinc-300">
+                    <path d="M12 2a1 1 0 0 1 1 1v1a1 1 0 0 1-2 0V3a1 1 0 0 1 1-1Zm0 18a1 1 0 0 1-1 1v1a1 1 0 0 1 2 0v-1a1 1 0 0 1-1-1Zm7-7a1 1 0 0 1 1 1h1a1 1 0 0 1 0 2h-1a1 1 0 0 1-1-1Zm-15 0a1 1 0 0 1-1-1H2a1 1 0 0 1 0-2h1a1 1 0 0 1 1 1Zm2.929-4.071a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414Zm10.607 9.193a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414ZM6.929 6.222a1 1 0 0 1 0 1.414l-.707.707A1 1 0 0 1 4.808 7.63l.707-.707a1 1 0 0 1 1.414 0Zm11.314 9.899a1 1 0 0 1 0 1.414l-.707.707a1 1 0 0 1-1.414-1.414l.707-.707a1 1 0 0 1 1.414 0ZM12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z" />
+                  </svg>
                 </div>
-                {t.source === 'user' && (
-                  <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className="w-5 h-5 text-zinc-300"
-                    >
-                      <path
-                        fillRule="evenodd"
-                        d="M7.5 6a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM3.751 20.105a8.25 8.25 0 0 1 16.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z"
-                        clipRule="evenodd"
-                      />
-                    </svg>
-                  </div>
-                )}
+              )}
+              <div
+                className={`rounded-lg px-4 py-2 max-w-[85%] backdrop-blur-sm ${
+                  t.source === 'user'
+                    ? 'bg-blue-600 bg-opacity-70'
+                    : 'bg-zinc-800 bg-opacity-70'
+                }`}>
+                <p className="text-white whitespace-pre-wrap">{t.text}</p>
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="p-4 border-t border-zinc-700 flex flex-col items-center gap-4">
-          <div className="flex items-center gap-2 text-sm bg-zinc-950 px-3 py-1 rounded-full">
-            <div className={`w-3 h-3 rounded-full ${statusInfo.color}`}></div>
-            <span>{statusInfo.text}</span>
-          </div>
-          <button
-            onClick={isProcessing ? stopAISession : startConversation}
-            className={`w-full py-3 text-base font-bold rounded-full border-none transition-colors flex items-center justify-center gap-2 ${
-              isProcessing
-                ? 'bg-red-600 hover:bg-red-700'
-                : 'bg-blue-600 hover:bg-blue-700'
-            } text-white`}
-          >
-            {isProcessing ? (
-              <>
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
-                  className="w-6 h-6"
-                >
-                  <path
-                    fillRule="evenodd"
-                    d="M4.5 7.5a3 3 0 0 1 3-3h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9Z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-                Stop Session
-              </>
-            ) : (
-              <>
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
-                  className="w-6 h-6"
-                >
-                  <path
-                    fillRule="evenodd"
-                    d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.647c1.295.742 1.295 2.545 0 3.286L7.279 20.99c-1.25.717-2.779-.217-2.779-1.643V5.653Z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-                Start Session
-              </>
-            )}
-          </button>
+              {t.source === 'user' && (
+                <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className="w-5 h-5 text-zinc-300">
+                    <path
+                      fillRule="evenodd"
+                      d="M7.5 6a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM3.751 20.105a8.25 8.25 0 0 1 16.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       </div>
     </div>

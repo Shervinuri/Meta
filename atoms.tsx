@@ -94,4 +94,5 @@ export const TemperatureAtom = atom(0.4);
 
 export const BumpSessionAtom = atom(0);
 
-export const ApiKeyAtom = atom<string | null>(null);
+// FIX: Export ApiKeyAtom to resolve module import error in ApiKeyModal.tsx.
+export const ApiKeyAtom = atom('');

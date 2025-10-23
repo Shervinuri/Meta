@@ -23,10 +23,11 @@ import React from 'react';
 import {DetectTypeAtom, HoverEnteredAtom} from './atoms';
 import {DetectTypes} from './Types';
 
-// Fix: Changed to a function declaration. This helps TypeScript correctly
-// infer that this is a React component that can accept a `key` prop, resolving
-// a type error.
-function SelectOption({label}: {label: string}) {
+// Fix: Explicitly setting the return type to JSX.Element helps TypeScript
+// correctly infer that this is a React component that can accept a `key` prop,
+// resolving a type error.
+// FIX: Changed JSX.Element to React.ReactElement to fix "Cannot find namespace 'JSX'" error.
+function SelectOption({label}: {label: string}): React.ReactElement {
   const [detectType, setDetectType] = useAtom(DetectTypeAtom);
   const [, setHoverEntered] = useAtom(HoverEnteredAtom);
 
