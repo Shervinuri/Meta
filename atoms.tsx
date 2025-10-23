@@ -31,13 +31,6 @@ export type ConnectionState =
   | 'closed';
 export const ConnectionStateAtom = atom<ConnectionState>('idle');
 
-export interface Transcript {
-  source: 'user' | 'model';
-  text: string;
-  isFinal: boolean;
-}
-export const TranscriptsAtom = atom<Transcript[]>([]);
-
 export const BoundingBoxesAtom = atom<BoundingBox2DType[]>([]);
 
 // FIX: Add missing atom exports

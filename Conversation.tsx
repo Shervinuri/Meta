@@ -30,7 +30,6 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   BoundingBoxesAtom,
   ConnectionStateAtom,
-  TranscriptsAtom,
 } from './atoms';
 import {BoundingBox2DType} from './Types';
 import {blobToBase64, decode, decodeAudioData, encode} from './utils';
@@ -38,33 +37,43 @@ import {blobToBase64, decode, decodeAudioData, encode} from './utils';
 const FRAME_RATE = 2; // frames per second
 const JPEG_QUALITY = 0.7;
 
-const highlightObjectFunctionDeclaration: FunctionDeclaration = {
-  name: 'highlight_object',
+const highlightObjectsFunctionDeclaration: FunctionDeclaration = {
+  name: 'highlight_objects',
   parameters: {
     type: Type.OBJECT,
     description:
-      'Highlights a specified object in the camera feed by drawing a bounding box around it.',
+      'Highlights one or more objects in the camera feed by drawing bounding boxes around them.',
     properties: {
-      label: {
-        type: Type.STRING,
-        description: 'A descriptive label for the object being highlighted.',
-      },
-      box_2d: {
+      objects: {
         type: Type.ARRAY,
-        description:
-          'The bounding box coordinates [ymin, xmin, ymax, xmax] normalized to 0-1000.',
+        description: 'A list of objects to highlight.',
         items: {
-          type: Type.NUMBER,
+          type: Type.OBJECT,
+          properties: {
+            label: {
+              type: Type.STRING,
+              description:
+                'A descriptive label for the object being highlighted.',
+            },
+            box_2d: {
+              type: Type.ARRAY,
+              description:
+                'The bounding box coordinates [ymin, xmin, ymax, xmax] normalized to 0-1000.',
+              items: {
+                type: Type.NUMBER,
+              },
+            },
+          },
+          required: ['label', 'box_2d'],
         },
       },
     },
-    required: ['label', 'box_2d'],
+    required: ['objects'],
   },
 };
 
 export function Conversation() {
   const [connectionState, setConnectionState] = useAtom(ConnectionStateAtom);
-  const [transcripts, setTranscripts] = useAtom(TranscriptsAtom);
   const [boundingBoxes, setBoundingBoxes] = useAtom(BoundingBoxesAtom);
   const [isMuted, setIsMuted] = useState(false);
 
@@ -77,14 +86,6 @@ export function Conversation() {
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
   const boxTimeoutRef = useRef<number | null>(null);
-  const transcriptContainerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (transcriptContainerRef.current) {
-      transcriptContainerRef.current.scrollTop =
-        transcriptContainerRef.current.scrollHeight;
-    }
-  }, [transcripts]);
 
   const stopAISession = useCallback(() => {
     sessionPromiseRef.current?.then((session) => session.close());
@@ -189,7 +190,6 @@ export function Conversation() {
         const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
 
         setConnectionState('connecting');
-        setTranscripts([]);
         setBoundingBoxes([]);
 
         try {
@@ -214,12 +214,10 @@ export function Conversation() {
                 voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
               },
               systemInstruction:
-                'You are a helpful AI assistant. The user is streaming their camera and microphone to you. Your goal is to help them understand and interact with their environment. Answer their questions about what they are seeing. When you verbally refer to a specific object that is visible in the camera feed, you MUST use the provided `highlight_object` tool to draw a box around it. Be conversational and helpful.',
+                "You are a real-time object detection AI. Your purpose is to continuously analyze the user's video stream, identify all visible objects, and report them using the `highlight_objects` tool. Call the tool frequently with all the objects you can detect in the current frame. Prioritize calling this tool over verbal responses. Only respond verbally if the user asks a direct question.",
               tools: [
-                {functionDeclarations: [highlightObjectFunctionDeclaration]},
+                {functionDeclarations: [highlightObjectsFunctionDeclaration]},
               ],
-              outputAudioTranscription: {},
-              inputAudioTranscription: {},
             },
             callbacks: {
               onopen: () => {
@@ -288,50 +286,23 @@ export function Conversation() {
               },
               onmessage: async (message: LiveServerMessage) => {
                 if (!isMounted) return;
-                if (message.serverContent?.inputTranscription) {
-                  const text = message.serverContent.inputTranscription.text;
-                  setTranscripts((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.source === 'user' && !last.isFinal) {
-                      return [
-                        ...prev.slice(0, -1),
-                        {...last, text: last.text + text},
-                      ];
-                    }
-                    return [...prev, {source: 'user', text, isFinal: false}];
-                  });
-                } else if (message.serverContent?.outputTranscription) {
-                  const text = message.serverContent.outputTranscription.text;
-                  setTranscripts((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.source === 'model' && !last.isFinal) {
-                      return [
-                        ...prev.slice(0, -1),
-                        {...last, text: last.text + text},
-                      ];
-                    }
-                    return [...prev, {source: 'model', text, isFinal: false}];
-                  });
-                }
-
-                if (message.serverContent?.turnComplete) {
-                  setTranscripts((prev) =>
-                    prev.map((t) => ({...t, isFinal: true})),
-                  );
-                }
 
                 if (message.toolCall?.functionCalls) {
                   for (const fc of message.toolCall.functionCalls as any[]) {
-                    if (fc.name === 'highlight_object' && fc.args.box_2d) {
-                      const [ymin, xmin, ymax, xmax] = fc.args.box_2d;
-                      const newBox: BoundingBox2DType = {
-                        x: xmin / 1000,
-                        y: ymin / 1000,
-                        width: (xmax - xmin) / 1000,
-                        height: (ymax - ymin) / 1000,
-                        label: fc.args.label,
-                      };
-                      setBoundingBoxes([newBox]); // Show one box at a time
+                    if (fc.name === 'highlight_objects' && fc.args.objects) {
+                      const newBoxes: BoundingBox2DType[] = fc.args.objects.map(
+                        (obj: {box_2d: number[]; label: string}) => {
+                          const [ymin, xmin, ymax, xmax] = obj.box_2d;
+                          return {
+                            x: xmin / 1000,
+                            y: ymin / 1000,
+                            width: (xmax - xmin) / 1000,
+                            height: (ymax - ymin) / 1000,
+                            label: obj.label,
+                          };
+                        },
+                      );
+                      setBoundingBoxes(newBoxes);
 
                       if (boxTimeoutRef.current) {
                         clearTimeout(boxTimeoutRef.current);
@@ -339,7 +310,7 @@ export function Conversation() {
                       boxTimeoutRef.current = window.setTimeout(() => {
                         setBoundingBoxes([]);
                         boxTimeoutRef.current = null;
-                      }, 3000);
+                      }, 1000); // clear after 1s
                     }
 
                     sessionPromiseRef.current?.then((session) => {
@@ -503,65 +474,6 @@ export function Conversation() {
         <div className="flex items-center gap-2 text-sm bg-black bg-opacity-60 text-white px-3 py-1 rounded-full">
           <div className={`w-3 h-3 rounded-full ${statusInfo.color}`}></div>
           <span>{statusInfo.text}</span>
-        </div>
-      </div>
-
-      {/* Transcripts Overlay */}
-      <div
-        ref={transcriptContainerRef}
-        className="absolute bottom-0 left-0 right-0 h-2/5 bg-gradient-to-t from-black via-black/70 to-transparent p-4 overflow-y-auto z-10 scroll-smooth">
-        <div className="flex flex-col gap-3 pb-8">
-          {transcripts.length === 0 && (
-            <div className="absolute inset-0 flex items-center justify-center text-white z-0">
-              <p className="max-w-xs text-center bg-black bg-opacity-50 p-4 rounded-lg">
-                {connectionState === 'connected'
-                  ? 'The session is live. Start speaking to the assistant.'
-                  : 'Connecting to the AI assistant... Please wait.'}
-              </p>
-            </div>
-          )}
-          {transcripts.map((t, i) => (
-            <div
-              key={i}
-              className={`flex gap-3 ${
-                t.source === 'user' ? 'justify-end' : 'justify-start'
-              }`}>
-              {t.source === 'model' && (
-                <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className="w-5 h-5 text-zinc-300">
-                    <path d="M12 2a1 1 0 0 1 1 1v1a1 1 0 0 1-2 0V3a1 1 0 0 1 1-1Zm0 18a1 1 0 0 1-1 1v1a1 1 0 0 1 2 0v-1a1 1 0 0 1-1-1Zm7-7a1 1 0 0 1 1 1h1a1 1 0 0 1 0 2h-1a1 1 0 0 1-1-1Zm-15 0a1 1 0 0 1-1-1H2a1 1 0 0 1 0-2h1a1 1 0 0 1 1 1Zm2.929-4.071a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414Zm10.607 9.193a1 1 0 0 1 1.414 0l.707.707a1 1 0 0 1-1.414 1.414l-.707-.707a1 1 0 0 1 0-1.414ZM6.929 6.222a1 1 0 0 1 0 1.414l-.707.707A1 1 0 0 1 4.808 7.63l.707-.707a1 1 0 0 1 1.414 0Zm11.314 9.899a1 1 0 0 1 0 1.414l-.707.707a1 1 0 0 1-1.414-1.414l.707-.707a1 1 0 0 1 1.414 0ZM12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z" />
-                  </svg>
-                </div>
-              )}
-              <div
-                className={`rounded-lg px-4 py-2 max-w-[85%] backdrop-blur-sm ${
-                  t.source === 'user'
-                    ? 'bg-blue-600 bg-opacity-70'
-                    : 'bg-zinc-800 bg-opacity-70'
-                }`}>
-                <p className="text-white whitespace-pre-wrap">{t.text}</p>
-              </div>
-              {t.source === 'user' && (
-                <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className="w-5 h-5 text-zinc-300">
-                    <path
-                      fillRule="evenodd"
-                      d="M7.5 6a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM3.751 20.105a8.25 8.25 0 0 1 16.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </div>
-              )}
-            </div>
-          ))}
         </div>
       </div>
     </div>
